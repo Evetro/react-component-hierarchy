@@ -29,7 +29,14 @@
   "dependencies": {
     "babylon": "^6.8.0",
     "commander": "^2.9.0",
+    "enhanced-resolve": "^4.1.0",
     "lodash": "^4.13.1",
     "pretty-tree": "jeffymahoney/pretty-tree"
+  },
+  "devDependencies": {
+    "eslint": "^5.14.1",
+    "eslint-config-airbnb": "^17.1.0",
+    "eslint-config-prettier": "^4.0.0",
+    "eslint-plugin-security": "^1.4.0"
   }
 }
