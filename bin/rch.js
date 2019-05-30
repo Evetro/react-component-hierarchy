@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 
 'use strict'; // eslint-disable-line
-const program = require('commander');
+const { accessSync, readFileSync, writeFileSync } = require('fs');
 const path = require('path');
+// const { promisify } = require('util');
 const babylon = require('babylon');
-const { readFileSync, writeFileSync } = require('fs');
+const program = require('commander');
+/*
+const {
+  NodeJsInputFileSystem,
+  CachedInputFileSystem,
+  ResolverFactory
+} = require('enhanced-resolve');
+*/
 const _ = require('lodash');
 const tree = require('pretty-tree');
 
 program
   .version('1.1.1')
   .usage('[opts] <path/to/rootComponent>')
-  // .option('-a, --aliasing  <config>', 'Path to Webpack config for getting module alias definitions')
+  .option('-a, --aliasing  <config>', 'Path to Webpack config for getting module alias definitions')
   .option('-c, --hide-containers', 'Hide redux container components')
   .option('-d, --scan-depth <depth>', 'Limit the depth of the component hierarchy that is displayed', parseInt, Number.POSITIVE_INFINITY)
   .option('-j, --json', 'Output graph to JSON file instead of printing it on screen')
@@ -24,14 +32,14 @@ if (!program.args[0]) {
   program.help();
 }
 
-// const webpackConfigPath = program.aliasing;
+const webpackConfigPath = program.aliasing;
 const hideContainers = program.hideContainers;
 const scanDepth = Math.max(program.scanDepth,1);
 const outputJSON = program.json;
 const moduleDir = program.moduleDir;
 const hideThirdParty = program.hideThirdParty;
 
-const filename = path.resolve(program.args[0]);
+const filename = path.resolve(program.args[0]); // root to be input in resolver
 
 const rootNode = {
   name: path.basename(filename).replace(/\.jsx?/, ''),
@@ -40,6 +48,35 @@ const rootNode = {
   children: [],
 };
 
+// Options for module resolver
+let alias = [];
+// Use directory of root file as part of modules list the resolver will search in when resolving imports
+// const modules = [path.dirname(filename), 'node_modules'];
+
+if (typeof webpackConfigPath === 'string' && webpackConfigPath.substring(0, 2) === './' && !(webpackConfigPath.includes('../'))) {
+  try {
+    const config = require(path.resolve(webpackConfigPath));
+    if (config != null && config.resolve != null && config.resolve.alias != null) alias = config.resolve.alias;
+  } catch (e) {
+    console.error(e.stack);
+  }
+} else if (webpackConfigPath.substring(0, 2) !== './') {
+  console.error('Path given must be relative to the execution environment.');
+} else if (confPath.includes('../')) {
+  console.error('Backtracking paths are disallowed when specifying Webpack config path.');
+}
+/*
+const moduleResolver = ResolverFactory.createResolver({
+  // The `CachedInputFileSystem` simply wraps the Node.js `fs` wrapper to add resilience + caching to `NodeJsInputFileSystem`.
+  fileSystem: new CachedInputFileSystem(new NodeJsInputFileSystem(), 4000),
+  extensions: ['.js', '.jsx'],
+  alias,
+  modules,
+});
+
+// The resolve function follows the callback-last-with-error-first convention enforced in NodeJS, so this will work
+const resolveFilePathAsync = promisify(moduleResolver.resolve).bind(moduleResolver);
+*/
 function extractModules(bodyItem) {
   if (
     bodyItem.type === 'ImportDeclaration' &&
@@ -79,26 +116,36 @@ function extractChildComponents(tokens, imports) {
   }
   return childComponents;
 }
+function resolveAliasedFilePath(node) {
+  const [aliasComponent, ...tail] = node.source.split('/'); // We assume here that / is the path separator used in aliased modules in the source code
+  // Match file name against aliases
+  const value = alias[aliasComponent];
+  if (typeof value === 'string') {
+    const resolved = value.includes('/') ? value.split('/').join(path.sep) : value;
+    const fp = tail.length > 0 ? `${resolved}${path.sep}${tail.join(path.sep)}` : resolved;
+    return fp;
+  }
+  return node.source;
+}
 
 function formatChild(child, parent, depth) {
-  let fileName;
+  const dir = path.dirname(parent.filename);
+  const filePath = resolveAliasedFilePath(child);
+  let filename;
   let source;
-
   if (child.source.startsWith('.')) {
-    // Relative import (./ or ../)
-    fileName = path.resolve(path.dirname(parent.filename) + '/' + child.source);
-    source = fileName.replace(process.cwd() + '/', '');
+    // Relative import (./ or ../) - Not an alias
+    filename = path.resolve(`${dir}${path.sep}${child.source}`);
+    source = filename.replace(`${process.cwd()}${path.sep}`, '');
+  } else if (Object.keys(alias).length > 0 && typeof filePath === 'string') {
+    filename = filePath;
+    source = filename.replace(`${process.cwd()}${path.sep}`, '');
   } else {
-    fileName = path.join(path.dirname(parent.filename), child.source);
+    // Third party component
+    filename = path.join(dir, child.source);
     source = child.source;
   }
-  return {
-    source,
-    name: child.name,
-    filename: fileName,
-    children: [],
-    depth,
-  };
+  return { source, name: child.name, filename, children: [], depth };
 }
 
 function extractExport(body) {
@@ -120,7 +167,6 @@ function findImportInArguments(func, imports, importNames) {
 
 function findImportInExportDeclaration(body, exportIdentifier, imports) {
   let result;
-  const importNames = imports.map(i => i.name);
   body.some(b => {
     if (
       b.type === 'VariableDeclaration' &&
@@ -132,7 +178,7 @@ function findImportInExportDeclaration(body, exportIdentifier, imports) {
       // or in the arguments of any other functions being called after this function
       let func = b.declarations[0].init;
       while (!result && func) {
-        result = findImportInArguments(func, imports, importNames);
+        result = findImportInArguments(func, imports, imports.map(i => i.name));
         if (!result) {
           func = _.get(func, '.callee');
         }
@@ -155,12 +201,14 @@ function findContainerChild(node, body, imports, depth) {
   const usedImport = findImportInExportDeclaration(
     body,
     exportIdentifier,
-    imports
+    imports,
   );
-  return (usedImport && [formatChild(usedImport, node, depth)]) || [];
+  if (usedImport == null) return [];
+  return [formatChild(usedImport, node, depth)];
 }
 
-function processFile(node, file, depth) {
+/** Processes index file for an aliased module  */
+function processIndexFile(node, file) {
   const ast = babylon.parse(file, {
     sourceType: 'module',
     plugins: [
@@ -176,20 +224,44 @@ function processFile(node, file, depth) {
       'objectRestSpread',
     ],
   });
-
-  // Get a list of imports and try to figure out which are child components
-  let imports = [];
-  for (const i of ast.program.body.map(extractModules)) {
-    if (!!i) {
-      imports = imports.concat(i);
-    }
+  const imports = ast.program.body.map(extractModules).filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
+  const match = ({ name }) => name = node.name;
+  if (imports.some(match)) {
+    const { source } = imports.filter(match).pop();
+    console.log(source);
+    // Resolve relative source
+    const newPath = `${path.dirname(node.filename)}${path.sep}${source.split('/').slice(1).join(path.sep)}`;
+    return [`${newPath}.jsx`, `${newPath}.js`];
   }
+  return [];
+}
+
+function processFile(node, file, depth) {
+  /** @warning Do not run this function if you are checking in an index file! **/
+  /** code below causes infinte loop! **/
+  const ast = babylon.parse(file, {
+    sourceType: 'module',
+    plugins: [
+      'asyncGenerators',
+      'classProperties',
+      'decorators',
+      'dynamicImport',
+      'exportExtensions',
+      'flow',
+      'functionBind',
+      'functionSent',
+      'jsx',
+      'objectRestSpread',
+    ],
+  });
+  // Get a list of imports and try to figure out which are child components
+  const imports = ast.program.body.map(extractModules).filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
   if (_.find(imports, { name: 'React' })) {
     // Look for children in the JSX
     const childComponents = _.uniq(extractChildComponents(ast.tokens, imports));
     node.children = childComponents.map(c => formatChild(c, node, depth));
   } else {
-    // Not JSX.. try to search for a wrapped component
+    // Not JSX... try to search for a wrapped component
     node.children = findContainerChild(node, ast.program.body, imports, depth);
   }
 }
@@ -204,7 +276,7 @@ function formatNodeToPrettyTree(node) {
   const source =
     path.basename(path.dirname(node.filename)) === node.name
       ? node.source
-      : node.source + '/' + node.name;
+      : node.source + path.sep + node.name;
   const newNode =
     node.children.length > 0
       ? {
@@ -248,45 +320,47 @@ function done() {
   process.exit();
 }
 
-// Get a list of names to try to resolve
-function getPossibleNames(baseName) {
-  return [
-    baseName,
-    baseName.replace('.js', '.jsx'),
-    baseName.replace('.js', '/index.js'),
-    baseName.replace('.js', '/index.jsx'),
-  ];
-}
-
 function processNode(node, depth, parent) {
-  const fileExt = path.extname(node.filename);
-  if (fileExt === '') {
-    // It's likely users will reference files that do not have an extension, try .js and then .jsx
-    node.filename = `${node.filename}.js`;
+  const getPossibleNames = baseName => [
+    baseName,
+    `${baseName}.jsx`,
+    `${baseName}.js`,
+    `${baseName}${path.sep}index.js`,
+    `${baseName}${path.sep}index.jsx`,
+  ];
+  const possibleFileNames = [];
+  if (Object.keys(alias).length > 0 && typeof node.source === 'string') {
+    possibleFileNames.push(...getPossibleNames(resolveAliasedFilePath(node)));
   }
-
-  let possibleFiles = getPossibleNames(node.filename);
-
+  possibleFileNames.push(...getPossibleNames(node.filename));
   if (parent && moduleDir) {
-    const baseName = node.filename.replace(
-      path.dirname(parent.filename),
-      moduleDir
-    );
-    possibleFiles = possibleFiles.concat(getPossibleNames(baseName));
+    const moduleName = node.filename.replace(path.dirname(parent.filename), moduleDir);
+    possibleFileNames.push(...getPossibleNames(moduleName));
   }
-
-  for (const name of possibleFiles) {
+  for (const name of possibleFileNames) {
+    if (name.endsWith('index.js') || name.endsWith('index.jsx')) {
+      try {
+        const f = readFileSync(name, 'utf8');
+        for (const newPath of processIndexFile(node, f)) {
+          const file = readFileSync(newPath, 'utf8');
+          if (depth <= scanDepth) {
+            processFile(node, file, depth);
+          }
+          node.children.forEach(c => processNode(c, depth + 1, node));
+          return;
+        }
+      } catch(e) { console.log(e.message); }
+    }
     node.filename = name;
     try {
       const file = readFileSync(node.filename, 'utf8');
-      if(depth <= scanDepth){
+      if (depth <= scanDepth) {
         processFile(node, file, depth);
       }
       node.children.forEach(c => processNode(c, depth + 1, node));
       return;
     } catch (e) {}
   }
-
   if (hideThirdParty) {
     node.hide = true;
   }
