@@ -75,9 +75,9 @@ export default SomeComponentContainer;
 # Roadmap
 
 Here follows the features we at Evetro intend to implement on this fork of RCH:
- * Support for outputting the generated component tree to JSON format
- * Support for Webpack aliasing (we REALLY need this for visualizing our React projects)
- * JSdoc in source code
+ * Support for outputting the generated component tree to a JSON file
+ * Support for Webpack aliasing (we REALLY need this feature)
+ * JSdoc in source code for improving code understanding
 
 ---
 
