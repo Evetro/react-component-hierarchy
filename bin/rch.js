@@ -1,18 +1,10 @@
 #!/usr/bin/env node
 
-'use strict'; // eslint-disable-line
-const { accessSync, readFileSync, writeFileSync } = require('fs');
+/* eslint-disable no-console */
+const { readFileSync, writeFileSync } = require('fs');
 const path = require('path');
-// const { promisify } = require('util');
 const babylon = require('babylon');
 const program = require('commander');
-/*
-const {
-  NodeJsInputFileSystem,
-  CachedInputFileSystem,
-  ResolverFactory
-} = require('enhanced-resolve');
-*/
 const _ = require('lodash');
 const tree = require('pretty-tree');
 
@@ -33,14 +25,13 @@ if (!program.args[0]) {
 }
 
 const webpackConfigPath = program.aliasing;
-const hideContainers = program.hideContainers;
-const scanDepth = Math.max(program.scanDepth,1);
+const { hideContainers, hideThirdParty, moduleDir } = program;
+const scanDepth = Math.max(program.scanDepth, 1);
 const outputJSON = program.json;
-const moduleDir = program.moduleDir;
-const hideThirdParty = program.hideThirdParty;
 
 const filename = path.resolve(program.args[0]); // root to be input in resolver
-
+const rootFolder = path.dirname(filename); // The catalog in which the provided root file lies
+console.log(rootFolder);
 const rootNode = {
   name: path.basename(filename).replace(/\.jsx?/, ''),
   filename,
@@ -49,38 +40,21 @@ const rootNode = {
 };
 
 // Options for module resolver
-let alias = [];
-// Use directory of root file as part of modules list the resolver will search in when resolving imports
-// const modules = [path.dirname(filename), 'node_modules'];
+let aliasLookup = [];
+// Use directory of root file as part of modules list the resolver will search in
+// when resolving imports
 
-if (typeof webpackConfigPath === 'string' && webpackConfigPath.substring(0, 2) === './' && !(webpackConfigPath.includes('../'))) {
-  try {
-    const config = require(path.resolve(webpackConfigPath));
-    if (config != null && config.resolve != null && config.resolve.alias != null) alias = config.resolve.alias;
-  } catch (e) {
-    console.error(e.stack);
+try {
+  // eslint-disable-next-line
+  const config = require(path.resolve(webpackConfigPath));
+  if (config != null && config.resolve != null && config.resolve.alias != null) {
+    aliasLookup = config.resolve.alias;
   }
-} else if (webpackConfigPath.substring(0, 2) !== './') {
-  console.error('Path given must be relative to the execution environment.');
-} else if (confPath.includes('../')) {
-  console.error('Backtracking paths are disallowed when specifying Webpack config path.');
-}
-/*
-const moduleResolver = ResolverFactory.createResolver({
-  // The `CachedInputFileSystem` simply wraps the Node.js `fs` wrapper to add resilience + caching to `NodeJsInputFileSystem`.
-  fileSystem: new CachedInputFileSystem(new NodeJsInputFileSystem(), 4000),
-  extensions: ['.js', '.jsx'],
-  alias,
-  modules,
-});
+} catch (e) { console.log(e.stack); }
 
-// The resolve function follows the callback-last-with-error-first convention enforced in NodeJS, so this will work
-const resolveFilePathAsync = promisify(moduleResolver.resolve).bind(moduleResolver);
-*/
 function extractModules(bodyItem) {
   if (
-    bodyItem.type === 'ImportDeclaration' &&
-    !bodyItem.source.value.endsWith('css')
+    bodyItem.type === 'ImportDeclaration' && !bodyItem.source.value.endsWith('css')
   ) {
     // There may be more than one import in the declaration
     return bodyItem.specifiers.map(specifier => ({
@@ -94,18 +68,16 @@ function extractModules(bodyItem) {
 function extractChildComponents(tokens, imports) {
   const childComponents = [];
   let childComponent;
-  for (var i = 0; i < tokens.length - 1; i++) {
+  for (let i = 0; i < tokens.length - 1; i += 1) {
     if (
-      tokens[i].type.label === 'jsxTagStart' &&
-      tokens[i + 1].type.label === 'jsxName'
+      tokens[i].type.label === 'jsxTagStart' && tokens[i + 1].type.label === 'jsxName'
     ) {
       childComponent = _.find(imports, { name: tokens[i + 1].value });
       if (childComponent) {
         childComponents.push(childComponent);
       }
     } else if (
-      tokens[i].type.label === 'jsxName' &&
-      tokens[i].value === 'component'
+      tokens[i].type.label === 'jsxName' && tokens[i].value === 'component'
     ) {
       // Find use of components in react-router, e.g. `<Route component={...}>`
       childComponent = _.find(imports, { name: tokens[i + 3].value });
@@ -116,41 +88,53 @@ function extractChildComponents(tokens, imports) {
   }
   return childComponents;
 }
+
+// The path resolver looks up a folder like this 'Components' -> 'clients/components',
+// and performs a string replacement
 function resolveAliasedFilePath(node) {
-  const [aliasComponent, ...tail] = node.source.split('/'); // We assume here that / is the path separator used in aliased modules in the source code
+  let resolvedPath = node.source;
+  console.log('node.source', resolvedPath);
+  const chain = node.source.split('/');
+  const aliasComponent = chain[0];
+  const tail = chain.slice(1);
+  console.log('aliasComponent', aliasComponent);
   // Match file name against aliases
-  const value = alias[aliasComponent];
+  const value = aliasLookup[aliasComponent];
+  console.log('aliasValue', value);
   if (typeof value === 'string') {
     const resolved = value.includes('/') ? value.split('/').join(path.sep) : value;
-    const fp = tail.length > 0 ? `${resolved}${path.sep}${tail.join(path.sep)}` : resolved;
-    return fp;
+    resolvedPath = tail.length > 0 ? `${resolved}${path.sep}${tail.join(path.sep)}` : resolved;
   }
-  return node.source;
+  console.log('resolved to', resolvedPath);
+  return resolvedPath;
 }
 
 function formatChild(child, parent, depth) {
   const dir = path.dirname(parent.filename);
   const filePath = resolveAliasedFilePath(child);
-  let filename;
-  let source;
+  console.log(filePath);
+  let f;
+  let s;
   if (child.source.startsWith('.')) {
     // Relative import (./ or ../) - Not an alias
-    filename = path.resolve(`${dir}${path.sep}${child.source}`);
-    source = filename.replace(`${process.cwd()}${path.sep}`, '');
-  } else if (Object.keys(alias).length > 0 && typeof filePath === 'string') {
-    filename = filePath;
-    source = filename.replace(`${process.cwd()}${path.sep}`, '');
+    f = path.resolve(`${dir}${path.sep}${child.source}`);
+    s = filename.replace(`${process.cwd()}${path.sep}`, '');
+  } else if (Object.keys(aliasLookup).length > 0 && typeof filePath === 'string') {
+    f = filePath;
+    s = filename.replace(`${process.cwd()}${path.sep}`, '');
   } else {
     // Third party component
-    filename = path.join(dir, child.source);
-    source = child.source;
+    f = path.join(dir, child.source);
+    s = child.source;
   }
-  return { source, name: child.name, filename, children: [], depth };
+  return {
+    source: s, name: child.name, filename: f, children: [], depth,
+  };
 }
 
 function extractExport(body) {
   let result;
-  body.some(b => {
+  body.some((b) => {
     if (b.type === 'ExportDefaultDeclaration') {
       result = b.declaration.name;
     }
@@ -167,11 +151,11 @@ function findImportInArguments(func, imports, importNames) {
 
 function findImportInExportDeclaration(body, exportIdentifier, imports) {
   let result;
-  body.some(b => {
+  body.some((b) => {
     if (
-      b.type === 'VariableDeclaration' &&
-      b.declarations[0].id.name === exportIdentifier &&
-      b.declarations[0].init.type === 'CallExpression'
+      b.type === 'VariableDeclaration'
+      && b.declarations[0].id.name === exportIdentifier
+      && b.declarations[0].init.type === 'CallExpression'
     ) {
       // If the export is being declared with the result of a function..
       // Try to find a reference to any of the imports either in the function arguments,
@@ -224,21 +208,23 @@ function processIndexFile(node, file) {
       'objectRestSpread',
     ],
   });
-  const imports = ast.program.body.map(extractModules).filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
-  const match = ({ name }) => name = node.name;
+  const imports = ast.program.body.map(extractModules)
+    .filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
+  const match = ({ name }) => name === node.name;
   if (imports.some(match)) {
     const { source } = imports.filter(match).pop();
-    console.log(source);
     // Resolve relative source
     const newPath = `${path.dirname(node.filename)}${path.sep}${source.split('/').slice(1).join(path.sep)}`;
+    console.log('newPath', newPath);
     return [`${newPath}.jsx`, `${newPath}.js`];
   }
   return [];
 }
 
 function processFile(node, file, depth) {
-  /** @warning Do not run this function if you are checking in an index file! **/
-  /** code below causes infinte loop! **/
+  /** @todo Upgrade babylon */
+  /** @warning Do not run this function if you are checking in an index file! */
+  /** code below causes infinte loop! */
   const ast = babylon.parse(file, {
     sourceType: 'module',
     plugins: [
@@ -255,7 +241,8 @@ function processFile(node, file, depth) {
     ],
   });
   // Get a list of imports and try to figure out which are child components
-  const imports = ast.program.body.map(extractModules).filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
+  const imports = ast.program.body.map(extractModules)
+    .filter(i => Boolean(i)).reduce((l, i) => l.concat(i), []);
   if (_.find(imports, { name: 'React' })) {
     // Look for children in the JSX
     const childComponents = _.uniq(extractChildComponents(ast.tokens, imports));
@@ -273,49 +260,44 @@ function formatNodeToPrettyTree(node) {
   }
   // If we have the source, format it nicely like `module/Component`
   // But only if the name won't be repeated like `module/Component/Component`
-  const source =
-    path.basename(path.dirname(node.filename)) === node.name
-      ? node.source
-      : node.source + path.sep + node.name;
-  const newNode =
-    node.children.length > 0
-      ? {
-          label: (node.source && source) || node.name,
-          nodes: node.children
-            .filter(n => !n.hide)
-            .sort((a, b) => {
-              // Sort the list by source and name for readability
-              const nameA = (a.source + a.name).toUpperCase();
-              const nameB = (b.source + b.name).toUpperCase();
-
-              if (nameA < nameB) {
-                return -1;
-              }
-              if (nameA > nameB) {
-                return 1;
-              }
-
-              return 0;
-            })
-            .map(formatNodeToPrettyTree),
-          depth: node.depth,
+  const source = path.basename(path.dirname(node.filename)) === node.name
+    ? node.source
+    : node.source + path.sep + node.name;
+  if (node.children.length < 1) {
+    return {
+      label: source,
+      depth: node.depth,
+    };
+  }
+  return {
+    label: (node.source && source) || node.name,
+    nodes: node.children
+      .filter(n => !n.hide)
+      .sort((a, b) => {
+        // Sort the list by source and name for readability
+        const nameA = (a.source + a.name).toUpperCase();
+        const nameB = (b.source + b.name).toUpperCase();
+        if (nameA < nameB) {
+          return -1;
         }
-      : {
-          label: source,
-          depth: node.depth,
-        };
-
-  return newNode;
+        if (nameA > nameB) {
+          return 1;
+        }
+        return 0;
+      })
+      .map(formatNodeToPrettyTree),
+    depth: node.depth,
+  };
 }
 
 function done() {
   if (!rootNode.children) {
     console.error(
-      'Could not find any components. Did you process the right file?'
+      'Could not find any components. Did you process the right file?',
     );
     process.exit(1);
   }
-  if (outputJSON) writeFileSync('data.json', JSON.stringify(rootNode));
+  if (outputJSON) writeFileSync('data.json', JSON.stringify(rootNode, null, 2));
   else console.log(tree(formatNodeToPrettyTree(rootNode)));
   process.exit();
 }
@@ -329,27 +311,27 @@ function processNode(node, depth, parent) {
     `${baseName}${path.sep}index.jsx`,
   ];
   const possibleFileNames = [];
-  if (Object.keys(alias).length > 0 && typeof node.source === 'string') {
-    possibleFileNames.push(...getPossibleNames(resolveAliasedFilePath(node)));
+  if (Object.keys(aliasLookup).length > 0 && typeof node.source === 'string') {
+    const x = resolveAliasedFilePath(node);
+    if (typeof x === 'string' && x !== node.source) possibleFileNames.push(...getPossibleNames(x));
   }
   possibleFileNames.push(...getPossibleNames(node.filename));
   if (parent && moduleDir) {
     const moduleName = node.filename.replace(path.dirname(parent.filename), moduleDir);
     possibleFileNames.push(...getPossibleNames(moduleName));
   }
-  for (const name of possibleFileNames) {
+  possibleFileNames.forEach((name) => {
     if (name.endsWith('index.js') || name.endsWith('index.jsx')) {
       try {
         const f = readFileSync(name, 'utf8');
-        for (const newPath of processIndexFile(node, f)) {
+        processIndexFile(node, f).forEach((newPath) => {
           const file = readFileSync(newPath, 'utf8');
           if (depth <= scanDepth) {
             processFile(node, file, depth);
           }
           node.children.forEach(c => processNode(c, depth + 1, node));
-          return;
-        }
-      } catch(e) { console.log(e.message); }
+        });
+      } catch (e) { console.log(e.message); }
     }
     node.filename = name;
     try {
@@ -359,8 +341,8 @@ function processNode(node, depth, parent) {
       }
       node.children.forEach(c => processNode(c, depth + 1, node));
       return;
-    } catch (e) {}
-  }
+    } catch (e) { console.log(e.message); }
+  });
   if (hideThirdParty) {
     node.hide = true;
   }
