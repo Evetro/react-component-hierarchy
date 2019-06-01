@@ -17,7 +17,7 @@
     "rch": "bin/rch.js"
   },
   "engine": {
-    "node": ">=4.0.0"
+    "node": ">=8.0.0"
   },
   "keywords": [
     "react",
@@ -29,12 +29,15 @@
   "dependencies": {
     "babylon": "^6.8.0",
     "commander": "^2.9.0",
-    "enhanced-resolve": "^4.1.0",
     "lodash": "^4.13.1",
     "pretty-tree": "jeffymahoney/pretty-tree"
   },
   "devDependencies": {
+    "babel-eslint": "^10.0.1",
     "eslint": "^5.14.1",
+    "eslint-plugin-import": "^2.17.3",
+    "eslint-plugin-jsx-a11y": "^6.2.1",
+    "eslint-plugin-react": "^7.13.0",
     "eslint-config-airbnb": "^17.1.0",
     "eslint-config-prettier": "^4.0.0",
     "eslint-plugin-security": "^1.4.0"
