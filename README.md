@@ -78,6 +78,7 @@ Here follows the features we at Evetro intend to implement on this fork of RCH:
  * Support for outputting the generated component tree to a JSON file
  * Support for Webpack aliasing (we REALLY need this feature)
  * JSdoc in source code for improving code understanding
+ * Value of -a option defaults to "./webpack.config.js"
 
 ---
 
