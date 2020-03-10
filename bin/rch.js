@@ -11,8 +11,9 @@ const tree = require('pretty-tree');
 program
   .version('1.1.1')
   .usage('[opts] <path/to/rootComponent>')
-  .option('-a, --aliasing  <config>', 'Path to Webpack config for getting module alias definitions')
+  .option('-a, --aliasing <config>', 'Path to Webpack config for getting module alias definitions')
   .option('-c, --hide-containers', 'Hide redux container components')
+  .option('-i, --index <filename>', 'Name of all index files which bundles modules together in one directory - skips adding the index file as a child')
   .option('-d, --scan-depth <depth>', 'Limit the depth of the component hierarchy that is displayed', parseInt, Number.POSITIVE_INFINITY)
   .option('-j, --json', 'Output graph to JSON file instead of printing it on screen')
   .option('-m, --module-dir <dir>', 'Path to additional modules not included in node_modules e.g. src')
@@ -24,7 +25,6 @@ if (!program.args[0]) {
   program.help();
 }
 
-const webpackConfigPath = program.aliasing;
 const { hideContainers, hideThirdParty, moduleDir } = program;
 const scanDepth = Math.max(program.scanDepth, 1);
 const outputJSON = program.json;
@@ -69,16 +69,12 @@ function extractChildComponents(tokens, imports) {
   const childComponents = [];
   let childComponent;
   for (let i = 0; i < tokens.length - 1; i += 1) {
-    if (
-      tokens[i].type.label === 'jsxTagStart' && tokens[i + 1].type.label === 'jsxName'
-    ) {
+    if (tokens[i].type.label === 'jsxTagStart' && tokens[i + 1].type.label === 'jsxName') {
       childComponent = _.find(imports, { name: tokens[i + 1].value });
       if (childComponent) {
         childComponents.push(childComponent);
       }
-    } else if (
-      tokens[i].type.label === 'jsxName' && tokens[i].value === 'component'
-    ) {
+    } else if (tokens[i].type.label === 'jsxName' && tokens[i].value === 'component') {
       // Find use of components in react-router, e.g. `<Route component={...}>`
       childComponent = _.find(imports, { name: tokens[i + 3].value });
       if (childComponent) {
@@ -91,6 +87,7 @@ function extractChildComponents(tokens, imports) {
 
 // The path resolver looks up a folder like this 'Components' -> 'clients/components',
 // and performs a string replacement
+/** @warning This function is required to be called only ONCE in this program */
 function resolveAliasedFilePath(node) {
   let resolvedPath = node.source;
   console.log('node.source', resolvedPath);
@@ -109,6 +106,8 @@ function resolveAliasedFilePath(node) {
   return resolvedPath;
 }
 
+/** Define a child component, and then process it */
+/** @warning The child parameter is not the same kind of object as the parent parameter */
 function formatChild(child, parent, depth) {
   const dir = path.dirname(parent.filename);
   const filePath = resolveAliasedFilePath(child);
@@ -120,6 +119,7 @@ function formatChild(child, parent, depth) {
     f = path.resolve(`${dir}${path.sep}${child.source}`);
     s = filename.replace(`${process.cwd()}${path.sep}`, '');
   } else if (Object.keys(aliasLookup).length > 0 && typeof filePath === 'string') {
+    // Aliased file path
     f = filePath;
     s = filename.replace(`${process.cwd()}${path.sep}`, '');
   } else {
@@ -191,7 +191,12 @@ function findContainerChild(node, body, imports, depth) {
   return [formatChild(usedImport, node, depth)];
 }
 
-/** Processes index file for an aliased module  */
+/**
+  * Processes an index.js file for an aliased module
+  * @todo upon processing an index.js file you will need the following parameters:
+  * - The current node (the parent)
+  * - The name of the component we are importing from the parent
+  */
 function processIndexFile(node, file) {
   const ast = babylon.parse(file, {
     sourceType: 'module',
@@ -221,6 +226,7 @@ function processIndexFile(node, file) {
   return [];
 }
 
+/** Define the children of a node by parsing its corresponding file */
 function processFile(node, file, depth) {
   /** @todo Upgrade babylon */
   /** @warning Do not run this function if you are checking in an index file! */
@@ -320,6 +326,7 @@ function processNode(node, depth, parent) {
     const moduleName = node.filename.replace(path.dirname(parent.filename), moduleDir);
     possibleFileNames.push(...getPossibleNames(moduleName));
   }
+  /** @todo Probe each path in possibleFileNames and return 1 to be processed */
   possibleFileNames.forEach((name) => {
     if (name.endsWith('index.js') || name.endsWith('index.jsx')) {
       try {
@@ -337,6 +344,15 @@ function processNode(node, depth, parent) {
     try {
       const file = readFileSync(node.filename, 'utf8');
       if (depth <= scanDepth) {
+        if (name.endsWith('index.js') || name.endsWith('index.jsx')) {
+          /**
+           * @warning an index.js file may be a catalogue file (gathering components)
+           * As such that file should NOT be "processed", but rather "replaced"
+           * by one of its imports upon defining it.
+           * If the node is an index file:
+           */
+          processIndexFile(node, file, depth);
+        }
         processFile(node, file, depth);
       }
       node.children.forEach(c => processNode(c, depth + 1, node));
